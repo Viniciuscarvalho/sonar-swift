@@ -96,38 +96,35 @@ Create a `.claude/CLAUDE.md` file in your repo with your project's coding standa
 
 ## How the AI Review Works
 
-When a PR with `.swift` files is opened or updated:
+The review runs in two modes to avoid redundant work:
 
-1. The workflow detects which Swift files changed
+| Event                        | Mode            | What gets reviewed                             |
+| ---------------------------- | --------------- | ---------------------------------------------- |
+| PR opened / ready for review | **Full**        | All `.swift` files changed vs base branch      |
+| New commits pushed           | **Incremental** | Only `.swift` files changed in the new commits |
+
+This means if you push a fix to one file, only that file gets re-reviewed — not the entire PR.
+
+### Flow
+
+1. The workflow detects which Swift files changed (full or incremental depending on the event)
 2. It clones the [swift-code-reviewer-skill](https://github.com/Viniciuscarvalho/swift-code-reviewer-skill) reference checklists (8 documents covering Swift quality, SwiftUI, performance, security, architecture, and more)
 3. [claude-code-action](https://github.com/anthropics/claude-code-action) reads each changed file and applies the checklists
 4. It posts a structured PR comment:
 
 ```
-### Swift Code Review
+### Swift Code Review (incremental)
 
-**Files reviewed**: 3 | **Issues**: 5 (0 critical, 1 high, 3 medium, 1 low)
+**Files reviewed**: 1 | **Issues**: 0
 
 #### Summary
-Clean SwiftUI code with good state management. One concurrency issue needs attention.
-
-#### High
-- `LoginViewModel.swift:45` — Mutable state without @MainActor isolation
-
-#### Medium
-- `ProfileView.swift:23` — Consider using @Observable instead of ObservableObject
-- ...
+Fix correctly addresses the @MainActor isolation issue from the previous review.
 
 #### Good Practices
-- Proper use of async/await in network layer
-- Consistent error handling with typed throws
-
-#### Action Items
-- [ ] Fix actor isolation in LoginViewModel
-- [ ] Migrate to @Observable where possible
+- Proper actor isolation applied to LoginViewModel
 ```
 
-Critical and High issues also get **inline comments** directly on the PR diff.
+On full reviews, the report includes all severity levels, inline comments on Critical/High issues, and a prioritized action items checklist.
 
 ---
 

@@ -25,14 +25,31 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get changed Swift files
+      - name: Detect changed Swift files (incremental)
         id: changed
         run: |
-          FILES=$(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}...HEAD -- '*.swift' | tr '\n' ' ')
+          EVENT="${{ github.event.action }}"
+
+          if [ "$EVENT" = "synchronize" ]; then
+            # Incremental: only files changed in the new commits pushed to the PR
+            BEFORE="${{ github.event.before }}"
+            AFTER="${{ github.event.after }}"
+            FILES=$(git diff --name-only --diff-filter=ACMR "$BEFORE"..."$AFTER" -- '*.swift' | tr '\n' ' ')
+            echo "mode=incremental" >> "$GITHUB_OUTPUT"
+          else
+            # Full: all Swift files changed in the PR vs base branch
+            FILES=$(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}...HEAD -- '*.swift' | tr '\n' ' ')
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+          fi
+
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
-          echo "count=$(echo "$FILES" | wc -w | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          COUNT=$(echo "$FILES" | wc -w | tr -d ' ')
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
           if [ -z "$FILES" ]; then
-            echo "No Swift files changed"
+            echo "No Swift files to review"
+          else
+            echo "Review mode: $EVENT | Files ($COUNT): $FILES"
           fi
 
       - name: Clone swift-code-reviewer-skill references
@@ -66,9 +83,14 @@ jobs:
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
+            REVIEW MODE: ${{ steps.changed.outputs.mode }}
             CHANGED FILES (${{ steps.changed.outputs.count }}): ${{ steps.changed.outputs.files }}
 
-            You are a senior Swift/SwiftUI code reviewer. Review ONLY the changed Swift files in this PR.
+            You are a senior Swift/SwiftUI code reviewer.
+
+            **Review mode: ${{ steps.changed.outputs.mode }}**
+            - If `full`: this is the first review — review all listed files thoroughly.
+            - If `incremental`: only NEW commits were pushed. Review ONLY the listed files (they are the ones that changed since the last review). Do NOT re-review files from previous commits.
 
             ## Review Checklists
 
@@ -84,23 +106,23 @@ jobs:
 
             Post a single PR comment with this structure:
 
-            ### 🔍 Swift Code Review
+            ### Swift Code Review (${{ steps.changed.outputs.mode }})
 
             **Files reviewed**: N | **Issues**: N (X critical, Y high, Z medium, W low)
 
             #### Summary
             Brief assessment of overall code quality.
 
-            #### 🔴 Critical / 🟠 High
+            #### Critical / High
             Issues that MUST be fixed before merge. Include `file:line` and code suggestion.
 
-            #### 🟡 Medium
+            #### Medium
             Should fix. Include `file:line`.
 
-            #### 🔵 Low
+            #### Low
             Nice to have.
 
-            #### ✅ Good Practices
+            #### Good Practices
             Acknowledge 2-3 things done well.
 
             #### Action Items
@@ -113,6 +135,7 @@ jobs:
             - Use a single PR comment (gh pr comment) for the full report
             - Be concise — no filler, no disclaimers
             - If no issues found, still post a short positive report
+            - On incremental reviews, if all issues are resolved, acknowledge it
 
           claude_args: |
             --allowedTools "Read,Bash(cat:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),mcp__github_inline_comment__create_inline_comment"

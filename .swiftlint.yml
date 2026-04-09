@@ -1,5 +1,5 @@
-# Sonar-Swift — Regras compartilhadas de SwiftLint
-# Plugável para qualquer projeto iOS 17+/SwiftUI
+# Sonar-Swift — Shared SwiftLint rules
+# Pluggable for any iOS 17+/SwiftUI project
 
 excluded:
   - Pods
@@ -11,13 +11,13 @@ excluded:
   - "**/*.generated.swift"
   - Package.swift
 
-# ─── Regras desabilitadas ───
+# ─── Disabled rules ───
 disabled_rules:
   - trailing_comma
   - opening_brace
   - todo
 
-# ─── Regras opt-in ───
+# ─── Opt-in rules ───
 opt_in_rules:
   - empty_count
   - empty_string
@@ -45,7 +45,7 @@ opt_in_rules:
   - vertical_whitespace_closing_braces
   - yoda_condition
 
-# ─── Configurações de regras ───
+# ─── Rule settings ───
 line_length:
   warning: 140
   error: 200

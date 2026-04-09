@@ -1,0 +1,52 @@
+name: Swift Code Review
+
+on:
+  pull_request:
+    paths:
+      - '**/*.swift'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  swift-review:
+    name: AI Code Review (Swift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed Swift files
+        id: changed
+        run: |
+          FILES=$(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}...HEAD -- '*.swift' | tr '\n' ' ')
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          if [ -z "$FILES" ]; then
+            echo "No Swift files changed"
+            exit 0
+          fi
+
+      - name: Clone swift-code-reviewer-skill
+        if: steps.changed.outputs.files != ''
+        run: |
+          git clone https://github.com/Viniciuscarvalho/swift-code-reviewer-skill.git /tmp/swift-reviewer
+
+      - name: Run SwiftLint on changed files
+        if: steps.changed.outputs.files != ''
+        run: |
+          brew install swiftlint 2>/dev/null || true
+          echo "## SwiftLint Report" > /tmp/lint-report.md
+          echo '```' >> /tmp/lint-report.md
+          swiftlint lint --config .swiftlint.yml ${{ steps.changed.outputs.files }} 2>&1 | tee -a /tmp/lint-report.md || true
+          echo '```' >> /tmp/lint-report.md
+
+      - name: Post lint results as PR comment
+        if: steps.changed.outputs.files != ''
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: swiftlint
+          path: /tmp/lint-report.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

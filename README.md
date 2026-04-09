@@ -130,6 +130,8 @@ On full reviews, the report includes all severity levels, inline comments on Cri
 
 ## SwiftLint Rules
 
+Sonar-Swift ships with sensible defaults for iOS 17+ / SwiftUI projects:
+
 | Rule                  | Warning | Error |
 | --------------------- | ------- | ----- |
 | Line length           | 140     | 200   |
@@ -140,7 +142,63 @@ On full reviews, the report includes all severity levels, inline comments on Cri
 
 Plus: `force_unwrapping`, `implicitly_unwrapped_optional`, `modifier_order`, and [20+ opt-in rules](.swiftlint.yml).
 
-Edit `.swiftlint.yml` in your project to override any rule.
+### Customizing Rules
+
+After installation, the `.swiftlint.yml` file lives in **your project root** — it's yours to edit. The installer will never overwrite it unless you explicitly use `--force`.
+
+Common customizations:
+
+```yaml
+# Relax line length for your team
+line_length:
+  warning: 160
+  error: 250
+
+# Disable a rule you don't want
+disabled_rules:
+  - trailing_comma
+  - force_unwrapping
+
+# Add opt-in rules
+opt_in_rules:
+  - empty_count
+  - closure_spacing
+
+# Exclude generated code
+excluded:
+  - Pods
+  - DerivedData
+  - "*/Generated"
+
+# Allow short variable names specific to your project
+identifier_name:
+  excluded:
+    - id
+    - x
+    - y
+    - vm
+    - io # add your own
+```
+
+See the full [SwiftLint rule directory](https://realm.github.io/SwiftLint/rule-directory.html) for all available rules.
+
+---
+
+## Updating
+
+To update workflows **without overwriting your custom `.swiftlint.yml`**:
+
+```bash
+curl -sL https://raw.githubusercontent.com/Viniciuscarvalho/sonar-swift/main/bin/install.sh | bash -s -- update
+```
+
+The installer supports three modes:
+
+| Command              | `.swiftlint.yml`                    | Workflows      |
+| -------------------- | ----------------------------------- | -------------- |
+| `bash` (default)     | Creates if missing, skips if exists | Always updated |
+| `bash -s -- update`  | Never touched                       | Always updated |
+| `bash -s -- --force` | Always overwritten                  | Always updated |
 
 ---
 

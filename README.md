@@ -86,7 +86,7 @@ gh secret set ANTHROPIC_API_KEY -R your-username/your-repo
 
 This opens a secure prompt — paste your key there. It is **never** stored in code or logs.
 
-> **Cost:** The default model is `claude-haiku-4-5-20251001`, which is extremely low cost (~$0.001 per review for typical PRs). You can change the model in `.github/workflows/swift-review.yml` if you want deeper analysis with `sonnet` or `opus`.
+> **Cost:** The default model is `sonnet` (Claude Sonnet), which provides the best balance between review quality and cost. You can change the model in `.github/workflows/swift-review.yml` — see [Changing the AI Model](#changing-the-ai-model) below.
 
 ### 3. (Optional) Add Project-Specific Rules
 
@@ -153,16 +153,37 @@ Edit `.swiftlint.yml` in your project to override any rule.
 No. SwiftLint runs independently. The API key is only required for the AI review job.
 
 **How much does the AI review cost?**
-With Haiku 4.5 (default), typical PR reviews cost fractions of a cent. You can monitor usage at [console.anthropic.com](https://console.anthropic.com).
+With Sonnet (default), typical PR reviews cost a few cents. You can monitor usage at [console.anthropic.com](https://console.anthropic.com).
 
 **Can I use a different Claude model?**
-Yes. Edit `model:` in `.github/workflows/swift-review.yml`. Options: `claude-haiku-4-5-20251001` (cheapest), `sonnet` (balanced), `opus` (deepest analysis).
+Yes — see [Changing the AI Model](#changing-the-ai-model) below.
 
 **Is my API key safe?**
 Yes. It's stored as a [GitHub encrypted secret](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions) — never exposed in logs, code, or PR comments.
 
 **Does it work with draft PRs?**
 No. The AI review skips draft PRs to save costs. It runs when the PR is marked as ready.
+
+---
+
+## Changing the AI Model
+
+The default model is **Sonnet** (`sonnet`), which provides high-quality reviews at a reasonable cost. To change it, edit the `model:` field in `.github/workflows/swift-review.yml`:
+
+```yaml
+- uses: anthropics/claude-code-action@v1
+  with:
+    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+    model: sonnet # <-- change this
+```
+
+Available models:
+
+| Model         | ID                          | Best for                                | Relative cost |
+| ------------- | --------------------------- | --------------------------------------- | ------------- |
+| **Haiku 4.5** | `claude-haiku-4-5-20251001` | Lowest cost, fast reviews               | $             |
+| **Sonnet**    | `sonnet`                    | Best quality/cost balance (default)     | $$            |
+| **Opus**      | `opus`                      | Deepest analysis, complex architectures | $$$           |
 
 ---
 

@@ -1,12 +1,13 @@
 <p align="center">
   <strong>Sonar-Swift</strong><br>
-  Pluggable SwiftLint CI for iOS projects — shared rules + GitHub Actions workflows.
+  Pluggable SwiftLint + AI Code Review CI for iOS projects.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-ffd60a?style=flat-square" alt="MIT License"></a>
   <a href="https://github.com/Viniciuscarvalho/sonar-swift/actions"><img src="https://img.shields.io/badge/CI-GitHub_Actions-2088FF?style=flat-square&logo=github-actions&logoColor=white" alt="GitHub Actions"></a>
   <a href="https://realm.github.io/SwiftLint/"><img src="https://img.shields.io/badge/SwiftLint-strict-ff6b6b?style=flat-square" alt="SwiftLint"></a>
+  <a href="https://github.com/Viniciuscarvalho/swift-code-reviewer-skill"><img src="https://img.shields.io/badge/AI_Review-Claude-a855f7?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PGNpcmNsZSBjeD0iMTIiIGN5PSIxMiIgcj0iMTAiIGZpbGw9Im5vbmUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIvPjwvc3ZnPg==&logoColor=white" alt="Claude AI Review"></a>
   <a href="#"><img src="https://img.shields.io/badge/Platform-iOS_17+-000000?style=flat-square&logo=apple&logoColor=white" alt="iOS 17+"></a>
   <a href="https://github.com/sponsors/Viniciuscarvalho"><img src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?style=flat-square&logo=github-sponsors&logoColor=white" alt="Sponsor"></a>
 </p>
@@ -15,16 +16,39 @@
 
 ## What It Does
 
-Sonar-Swift is a **plug-and-play SwiftLint setup** for any iOS project. Install it once and every PR gets automatic lint checks with inline annotations and a consolidated review comment.
+Sonar-Swift gives any iOS project **two layers of automated review** on every PR:
 
-- **Zero config** — works out of the box with sensible defaults
-- **Two CI workflows** — strict lint + PR review comment
-- **One-line install** — `curl` script copies everything you need
-- **Customizable** — override any rule in your local `.swiftlint.yml`
+1. **SwiftLint** — fast static analysis with `--strict` mode and inline annotations
+2. **AI Code Review** — powered by [Claude](https://anthropic.com) + the [swift-code-reviewer-skill](https://github.com/Viniciuscarvalho/swift-code-reviewer-skill), covering concurrency, security, performance, architecture, and SwiftUI best practices
+
+Install once, get both.
+
+---
+
+## Architecture
+
+```
+PR with .swift files
+    │
+    ├── Job 1: SwiftLint (free, fast)
+    │     └── Inline annotations in PR diff
+    │
+    └── Job 2: AI Code Review (requires API key)
+          ├── Loads swift-code-reviewer-skill checklists
+          │     ├── Swift 6+ quality (actors, Sendable, async/await)
+          │     ├── SwiftUI patterns (state, property wrappers, modern APIs)
+          │     ├── Performance (view updates, ForEach, layout)
+          │     ├── Security (force unwraps, keychain, input validation)
+          │     └── Architecture (MVVM, DI, separation of concerns)
+          ├── Reads .claude/CLAUDE.md for project-specific rules (if present)
+          └── Posts structured review with severity levels + inline comments
+```
 
 ---
 
 ## Quick Start
+
+### 1. Install
 
 ```bash
 curl -sL https://raw.githubusercontent.com/Viniciuscarvalho/sonar-swift/main/bin/install.sh | bash
@@ -39,30 +63,75 @@ cp -r /tmp/sonar-swift/.github .
 rm -rf /tmp/sonar-swift
 ```
 
+This copies three files into your project:
+
+| File                                 | Purpose                                                                     |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| `.swiftlint.yml`                     | Shared lint rules (140/200 line length, force_unwrapping, 20+ opt-in rules) |
+| `.github/workflows/swiftlint.yml`    | SwiftLint CI — runs on every PR with `--strict`                             |
+| `.github/workflows/swift-review.yml` | AI Code Review CI — Claude-powered review with inline comments              |
+
+### 2. Configure the API Key
+
+The AI review workflow requires an **Anthropic API key**. Without it, Job 1 (SwiftLint) still works normally — Job 2 (AI Review) simply won't run.
+
+**Step by step:**
+
+1. Create an API key at [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
+2. Add it as a repository secret:
+
+```bash
+gh secret set ANTHROPIC_API_KEY -R your-username/your-repo
+```
+
+This opens a secure prompt — paste your key there. It is **never** stored in code or logs.
+
+> **Cost:** The default model is `claude-haiku-4-5-20251001`, which is extremely low cost (~$0.001 per review for typical PRs). You can change the model in `.github/workflows/swift-review.yml` if you want deeper analysis with `sonnet` or `opus`.
+
+### 3. (Optional) Add Project-Specific Rules
+
+Create a `.claude/CLAUDE.md` file in your repo with your project's coding standards. The AI reviewer reads it automatically and applies your custom rules on top of the default checklists.
+
 ---
 
-## What Gets Installed
+## How the AI Review Works
 
-| File                                 | Purpose                                            |
-| ------------------------------------ | -------------------------------------------------- |
-| `.swiftlint.yml`                     | Shared lint rules                                  |
-| `.github/workflows/swiftlint.yml`    | CI that runs SwiftLint on every PR with `--strict` |
-| `.github/workflows/swift-review.yml` | CI that posts a lint report as a PR comment        |
+When a PR with `.swift` files is opened or updated:
+
+1. The workflow detects which Swift files changed
+2. It clones the [swift-code-reviewer-skill](https://github.com/Viniciuscarvalho/swift-code-reviewer-skill) reference checklists (8 documents covering Swift quality, SwiftUI, performance, security, architecture, and more)
+3. [claude-code-action](https://github.com/anthropics/claude-code-action) reads each changed file and applies the checklists
+4. It posts a structured PR comment:
+
+```
+### Swift Code Review
+
+**Files reviewed**: 3 | **Issues**: 5 (0 critical, 1 high, 3 medium, 1 low)
+
+#### Summary
+Clean SwiftUI code with good state management. One concurrency issue needs attention.
+
+#### High
+- `LoginViewModel.swift:45` — Mutable state without @MainActor isolation
+
+#### Medium
+- `ProfileView.swift:23` — Consider using @Observable instead of ObservableObject
+- ...
+
+#### Good Practices
+- Proper use of async/await in network layer
+- Consistent error handling with typed throws
+
+#### Action Items
+- [ ] Fix actor isolation in LoginViewModel
+- [ ] Migrate to @Observable where possible
+```
+
+Critical and High issues also get **inline comments** directly on the PR diff.
 
 ---
 
-## How It Works
-
-When you open or update a PR with `.swift` files, two jobs run automatically:
-
-1. **SwiftLint** — validates against `.swiftlint.yml` rules with `--strict`. Errors appear inline in the PR diff.
-2. **Swift Review** — runs lint on changed files and posts a consolidated report as a PR comment.
-
-Nothing runs locally unless you want it to (`swiftlint lint`).
-
----
-
-## Default Rules
+## SwiftLint Rules
 
 | Rule                  | Warning | Error |
 | --------------------- | ------- | ----- |
@@ -74,17 +143,33 @@ Nothing runs locally unless you want it to (`swiftlint lint`).
 
 Plus: `force_unwrapping`, `implicitly_unwrapped_optional`, `modifier_order`, and [20+ opt-in rules](.swiftlint.yml).
 
+Edit `.swiftlint.yml` in your project to override any rule.
+
 ---
 
-## Customization
+## FAQ
 
-Edit `.swiftlint.yml` in your project to override any rule. The defaults target iOS 17+ / SwiftUI projects.
+**Do I need the API key for SwiftLint to work?**
+No. SwiftLint runs independently. The API key is only required for the AI review job.
+
+**How much does the AI review cost?**
+With Haiku 4.5 (default), typical PR reviews cost fractions of a cent. You can monitor usage at [console.anthropic.com](https://console.anthropic.com).
+
+**Can I use a different Claude model?**
+Yes. Edit `model:` in `.github/workflows/swift-review.yml`. Options: `claude-haiku-4-5-20251001` (cheapest), `sonnet` (balanced), `opus` (deepest analysis).
+
+**Is my API key safe?**
+Yes. It's stored as a [GitHub encrypted secret](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions) — never exposed in logs, code, or PR comments.
+
+**Does it work with draft PRs?**
+No. The AI review skips draft PRs to save costs. It runs when the PR is marked as ready.
 
 ---
 
 ## Requirements
 
-- **CI**: SwiftLint is installed automatically by the workflow (macOS runner)
+- **CI (SwiftLint)**: Installed automatically by the workflow (macOS runner)
+- **CI (AI Review)**: `ANTHROPIC_API_KEY` secret configured in your repo
 - **Local** (optional): `brew install swiftlint`
 
 ---

@@ -2,17 +2,24 @@ name: Swift Code Review
 
 on:
   pull_request:
+    types: [opened, synchronize, ready_for_review]
     paths:
-      - '**/*.swift'
+      - "**/*.swift"
 
 permissions:
   contents: read
   pull-requests: write
+  id-token: write
+
+concurrency:
+  group: swift-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   swift-review:
     name: AI Code Review (Swift)
     runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,30 +30,89 @@ jobs:
         run: |
           FILES=$(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}...HEAD -- '*.swift' | tr '\n' ' ')
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "count=$(echo "$FILES" | wc -w | tr -d ' ')" >> "$GITHUB_OUTPUT"
           if [ -z "$FILES" ]; then
             echo "No Swift files changed"
-            exit 0
           fi
 
-      - name: Clone swift-code-reviewer-skill
+      - name: Clone swift-code-reviewer-skill references
         if: steps.changed.outputs.files != ''
         run: |
-          git clone https://github.com/Viniciuscarvalho/swift-code-reviewer-skill.git /tmp/swift-reviewer
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/Viniciuscarvalho/swift-code-reviewer-skill.git /tmp/swift-reviewer
+          cd /tmp/swift-reviewer
+          git sparse-checkout set references
+          echo "--- Checklists loaded ---"
+          ls references/
 
-      - name: Run SwiftLint on changed files
+      - name: Build review context
         if: steps.changed.outputs.files != ''
         run: |
-          brew install swiftlint 2>/dev/null || true
-          echo "## SwiftLint Report" > /tmp/lint-report.md
-          echo '```' >> /tmp/lint-report.md
-          swiftlint lint --config .swiftlint.yml ${{ steps.changed.outputs.files }} 2>&1 | tee -a /tmp/lint-report.md || true
-          echo '```' >> /tmp/lint-report.md
+          echo "# Swift Code Review Checklists" > /tmp/review-context.md
+          echo "" >> /tmp/review-context.md
+          for f in /tmp/swift-reviewer/references/*.md; do
+            echo "---" >> /tmp/review-context.md
+            cat "$f" >> /tmp/review-context.md
+            echo "" >> /tmp/review-context.md
+          done
 
-      - name: Post lint results as PR comment
+      - name: Run Claude Code Review
         if: steps.changed.outputs.files != ''
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: anthropics/claude-code-action@v1
         with:
-          header: swiftlint
-          path: /tmp/lint-report.md
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: sonnet
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            CHANGED FILES (${{ steps.changed.outputs.count }}): ${{ steps.changed.outputs.files }}
+
+            You are a senior Swift/SwiftUI code reviewer. Review ONLY the changed Swift files in this PR.
+
+            ## Review Checklists
+
+            Load and apply the checklists from /tmp/review-context.md which contain:
+            - Swift 6+ quality (concurrency, Sendable, actors, async/await)
+            - SwiftUI patterns (state management, property wrappers, modern APIs)
+            - Performance (view updates, ForEach identity, layout efficiency)
+            - Security (force unwraps, input validation, sensitive data, keychain)
+            - Architecture (MVVM compliance, DI, separation of concerns)
+            - Custom guidelines from .claude/CLAUDE.md if present in the repo
+
+            ## Output Format
+
+            Post a single PR comment with this structure:
+
+            ### 🔍 Swift Code Review
+
+            **Files reviewed**: N | **Issues**: N (X critical, Y high, Z medium, W low)
+
+            #### Summary
+            Brief assessment of overall code quality.
+
+            #### 🔴 Critical / 🟠 High
+            Issues that MUST be fixed before merge. Include `file:line` and code suggestion.
+
+            #### 🟡 Medium
+            Should fix. Include `file:line`.
+
+            #### 🔵 Low
+            Nice to have.
+
+            #### ✅ Good Practices
+            Acknowledge 2-3 things done well.
+
+            #### Action Items
+            Prioritized checklist of what to fix.
+
+            ## Rules
+            - Read each changed file fully before reviewing
+            - If .claude/CLAUDE.md exists, read it and apply project-specific rules
+            - Use inline comments (mcp__github_inline_comment__create_inline_comment) for Critical/High issues
+            - Use a single PR comment (gh pr comment) for the full report
+            - Be concise — no filler, no disclaimers
+            - If no issues found, still post a short positive report
+
+          claude_args: |
+            --allowedTools "Read,Bash(cat:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),mcp__github_inline_comment__create_inline_comment"

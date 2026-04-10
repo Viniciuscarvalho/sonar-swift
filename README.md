@@ -16,12 +16,14 @@
 
 ## What It Does
 
-Sonar-Swift gives any iOS project **two layers of automated review** on every PR:
+Sonar-Swift gives any iOS project **two layers of automated review** with a cost-conscious architecture:
 
-1. **SwiftLint** — fast static analysis with `--strict` mode and inline annotations
-2. **AI Code Review** — powered by [Claude](https://anthropic.com) + the [swift-code-reviewer-skill](https://github.com/Viniciuscarvalho/swift-code-reviewer-skill), covering concurrency, security, performance, architecture, and SwiftUI best practices
+| Layer       | Trigger                      | Cost            | What it does                                         |
+| ----------- | ---------------------------- | --------------- | ---------------------------------------------------- |
+| **Layer 1** | Every PR with `.swift` files | **$0**          | SwiftLint with PR comment report + 3 fix options     |
+| **Layer 2** | Add `ai-review` label        | **~$0.01-0.04** | AI code review with Sonnet, token tracking in footer |
 
-Install once, get both.
+Layer 1 always runs for free. Layer 2 only runs when you explicitly ask for it.
 
 ---
 
@@ -29,19 +31,22 @@ Install once, get both.
 
 ```
 PR with .swift files
-    │
-    ├── Job 1: SwiftLint (free, fast)
-    │     └── Inline annotations in PR diff
-    │
-    └── Job 2: AI Code Review (requires API key)
-          ├── Loads swift-code-reviewer-skill checklists
-          │     ├── Swift 6+ quality (actors, Sendable, async/await)
-          │     ├── SwiftUI patterns (state, property wrappers, modern APIs)
-          │     ├── Performance (view updates, ForEach, layout)
-          │     ├── Security (force unwraps, keychain, input validation)
-          │     └── Architecture (MVVM, DI, separation of concerns)
-          ├── Reads .claude/CLAUDE.md for project-specific rules (if present)
-          └── Posts structured review with severity levels + inline comments
+    |
+    +-- Layer 1: SwiftLint (always, $0)
+    |     +-- Inline annotations in PR diff
+    |     +-- PR comment with lint report
+    |     +-- 3 fix options:
+    |           1. swiftlint --fix (autofix)
+    |           2. claude "fix SwiftLint issues" (local)
+    |           3. Add 'ai-review' label (trigger Layer 2)
+    |
+    +-- Layer 2: AI Review (on-demand, label-triggered)
+          +-- Triggered by 'ai-review' label only
+          +-- Loads SKILL.md (lightweight, no full references)
+          +-- Sonnet with max_tokens: 2048
+          +-- Incremental: only reviews new commits on re-trigger
+          +-- Token count + cost estimate in footer
+          +-- Label auto-removed after review
 ```
 
 ---
@@ -65,17 +70,15 @@ rm -rf /tmp/sonar-swift
 
 This copies three files into your project:
 
-| File                                 | Purpose                                                                     |
-| ------------------------------------ | --------------------------------------------------------------------------- |
-| `.swiftlint.yml`                     | Shared lint rules (140/200 line length, force_unwrapping, 20+ opt-in rules) |
-| `.github/workflows/swiftlint.yml`    | SwiftLint CI — runs on every PR with `--strict`                             |
-| `.github/workflows/swift-review.yml` | AI Code Review CI — Claude-powered review with inline comments              |
+| File                                 | Purpose                                                   |
+| ------------------------------------ | --------------------------------------------------------- |
+| `.swiftlint.yml`                     | Shared lint rules (140/200 line length, 20+ opt-in rules) |
+| `.github/workflows/swiftlint.yml`    | Layer 1: SwiftLint CI (free, every PR)                    |
+| `.github/workflows/swift-review.yml` | Layer 2: AI Code Review (on-demand, label-triggered)      |
 
-### 2. Configure the API Key
+### 2. Configure the API Key (for Layer 2)
 
-The AI review workflow requires an **Anthropic API key**. Without it, Job 1 (SwiftLint) still works normally — Job 2 (AI Review) simply won't run.
-
-**Step by step:**
+Layer 1 works immediately with no configuration. For Layer 2, add an Anthropic API key:
 
 1. Create an API key at [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys)
 2. Add it as a repository secret:
@@ -84,9 +87,11 @@ The AI review workflow requires an **Anthropic API key**. Without it, Job 1 (Swi
 gh secret set ANTHROPIC_API_KEY -R your-username/your-repo
 ```
 
-This opens a secure prompt — paste your key there. It is **never** stored in code or logs.
+3. Create the trigger label:
 
-> **Cost:** The default model is `sonnet` (Claude Sonnet), which provides the best balance between review quality and cost. You can change the model in `.github/workflows/swift-review.yml` — see [Changing the AI Model](#changing-the-ai-model) below.
+```bash
+gh label create ai-review -c 8B5CF6 -d "Trigger AI code review"
+```
 
 ### 3. (Optional) Add Project-Specific Rules
 
@@ -94,37 +99,64 @@ Create a `.claude/CLAUDE.md` file in your repo with your project's coding standa
 
 ---
 
-## How the AI Review Works
+## Layer 1: SwiftLint (Free)
 
-The review runs in two modes to avoid redundant work:
+Runs automatically on every PR that touches `.swift` files.
 
-| Event                        | Mode            | What gets reviewed                             |
-| ---------------------------- | --------------- | ---------------------------------------------- |
-| PR opened / ready for review | **Full**        | All `.swift` files changed vs base branch      |
-| New commits pushed           | **Incremental** | Only `.swift` files changed in the new commits |
+**What it does:**
 
-This means if you push a fix to one file, only that file gets re-reviewed — not the entire PR.
+- Runs SwiftLint with `--strict` mode
+- Posts inline annotations in the PR diff
+- Posts a PR comment with a formatted issue table
+- Offers 3 fix options: autofix, Claude Code local, or request AI review
 
-### Flow
-
-1. The workflow detects which Swift files changed (full or incremental depending on the event)
-2. It clones the [swift-code-reviewer-skill](https://github.com/Viniciuscarvalho/swift-code-reviewer-skill) reference checklists (8 documents covering Swift quality, SwiftUI, performance, security, architecture, and more)
-3. [claude-code-action](https://github.com/anthropics/claude-code-action) reads each changed file and applies the checklists
-4. It posts a structured PR comment:
+**Example PR comment:**
 
 ```
-### Swift Code Review (incremental)
+## SwiftLint Report
 
-**Files reviewed**: 1 | **Issues**: 0
+**5 issues found** (1 errors, 4 warnings)
 
-#### Summary
-Fix correctly addresses the @MainActor isolation issue from the previous review.
+| Severity | Location | Rule | Description |
+|----------|----------|------|-------------|
+| Error | `ViewModel.swift:42` | force_unwrapping | Force unwrapping should be avoided |
+| Warning | `View.swift:88` | line_length | Line should be 140 characters or less |
+...
 
-#### Good Practices
-- Proper actor isolation applied to LoginViewModel
+### How to fix
+
+1. **Autofix** — run locally: `swiftlint lint --fix`
+2. **Claude Code** — run locally: `claude "fix the SwiftLint issues in this PR"`
+3. **Request AI Review** — add the `ai-review` label to this PR
 ```
 
-On full reviews, the report includes all severity levels, inline comments on Critical/High issues, and a prioritized action items checklist.
+---
+
+## Layer 2: AI Review (On-Demand)
+
+Runs only when you add the `ai-review` label to a PR.
+
+**Cost controls:**
+
+- Uses Sonnet (best quality/cost balance)
+- Loads only `SKILL.md` — no full reference cloning
+- Output capped at `max_tokens: 2048`
+- Diff truncated to 500 lines for large PRs
+- Token count and cost estimate shown in every review footer
+
+**Incremental reviews:**
+When you add `ai-review` a second time (after pushing new commits), the workflow detects the previous review's commit SHA and only sends the new diff to the API — fewer tokens, lower cost.
+
+| Trigger                              | Mode            | What gets reviewed                        |
+| ------------------------------------ | --------------- | ----------------------------------------- |
+| First `ai-review` label              | **Full**        | All `.swift` files changed vs base branch |
+| Re-add `ai-review` after new commits | **Incremental** | Only files changed since last review      |
+
+**Example footer:**
+
+```
+Layer 2 — AI Review (incremental) | Model: claude-sonnet-4-20250514 | Tokens: 1842 in / 1024 out | Cache: 0 read | Est. cost: ~$0.0209 | Stop: end_turn
+```
 
 ---
 
@@ -205,47 +237,29 @@ The installer supports three modes:
 ## FAQ
 
 **Do I need the API key for SwiftLint to work?**
-No. SwiftLint runs independently. The API key is only required for the AI review job.
+No. Layer 1 (SwiftLint) runs independently with zero cost. The API key is only required for Layer 2.
 
 **How much does the AI review cost?**
-With Sonnet (default), typical PR reviews cost a few cents. You can monitor usage at [console.anthropic.com](https://console.anthropic.com).
+Each review costs ~$0.01-0.04 depending on diff size. The exact token count and cost estimate is shown in every review comment footer so you can monitor usage.
 
-**Can I use a different Claude model?**
-Yes — see [Changing the AI Model](#changing-the-ai-model) below.
+**How do I trigger an AI review?**
+Add the `ai-review` label to any PR. The label is automatically removed after the review completes. To re-review after pushing new commits, add the label again — it will run in incremental mode.
 
 **Is my API key safe?**
 Yes. It's stored as a [GitHub encrypted secret](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions) — never exposed in logs, code, or PR comments.
 
 **Does it work with draft PRs?**
-No. The AI review skips draft PRs to save costs. It runs when the PR is marked as ready.
+Layer 1 (SwiftLint) runs on all PRs. Layer 2 (AI Review) skips draft PRs to save costs.
 
----
-
-## Changing the AI Model
-
-The default model is **Sonnet** (`sonnet`), which provides high-quality reviews at a reasonable cost. To change it, edit the `model:` field in `.github/workflows/swift-review.yml`:
-
-```yaml
-- uses: anthropics/claude-code-action@v1
-  with:
-    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-    model: sonnet # <-- change this
-```
-
-Available models:
-
-| Model         | ID                          | Best for                                | Relative cost |
-| ------------- | --------------------------- | --------------------------------------- | ------------- |
-| **Haiku 4.5** | `claude-haiku-4-5-20251001` | Lowest cost, fast reviews               | $             |
-| **Sonnet**    | `sonnet`                    | Best quality/cost balance (default)     | $$            |
-| **Opus**      | `opus`                      | Deepest analysis, complex architectures | $$$           |
+**What model does it use?**
+Sonnet (`claude-sonnet-4-20250514`). The model is configured in `.github/workflows/swift-review.yml`.
 
 ---
 
 ## Requirements
 
-- **CI (SwiftLint)**: Installed automatically by the workflow (macOS runner)
-- **CI (AI Review)**: `ANTHROPIC_API_KEY` secret configured in your repo
+- **CI (Layer 1)**: SwiftLint installed automatically by the workflow (macOS runner)
+- **CI (Layer 2)**: `ANTHROPIC_API_KEY` secret + `ai-review` label created in your repo
 - **Local** (optional): `brew install swiftlint`
 
 ---

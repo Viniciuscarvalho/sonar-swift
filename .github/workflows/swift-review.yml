@@ -1,141 +1,332 @@
-name: Swift Code Review
+name: "Layer 2: AI Code Review"
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review]
-    paths:
-      - "**/*.swift"
+    types: [labeled]
 
 permissions:
   contents: read
   pull-requests: write
-  id-token: write
 
 concurrency:
-  group: swift-review-${{ github.event.pull_request.number }}
+  group: ai-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  swift-review:
-    name: AI Code Review (Swift)
+  ai-review:
+    name: AI Code Review (Sonnet)
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
+    if: github.event.label.name == 'ai-review' && github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Detect changed Swift files (incremental)
+      - name: Check for previous review (incremental support)
+        id: previous
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const marker = 'Layer 2 — AI Review';
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              // Extract reviewed SHA from hidden marker
+              const match = existing.body.match(/<!-- reviewed-sha:(\w+) -->/);
+              if (match) {
+                core.setOutput('reviewed_sha', match[1]);
+                core.setOutput('has_previous', 'true');
+                console.log(`Found previous review at commit ${match[1]}`);
+                return;
+              }
+            }
+
+            core.setOutput('has_previous', 'false');
+            core.setOutput('reviewed_sha', '');
+
+      - name: Detect changed Swift files
         id: changed
         run: |
-          EVENT="${{ github.event.action }}"
+          PREVIOUS_SHA="${{ steps.previous.outputs.reviewed_sha }}"
+          HAS_PREVIOUS="${{ steps.previous.outputs.has_previous }}"
 
-          if [ "$EVENT" = "synchronize" ]; then
-            # Incremental: only files changed in the new commits pushed to the PR
-            BEFORE="${{ github.event.before }}"
-            AFTER="${{ github.event.after }}"
-            FILES=$(git diff --name-only --diff-filter=ACMR "$BEFORE"..."$AFTER" -- '*.swift' | tr '\n' ' ')
+          if [ "$HAS_PREVIOUS" = "true" ] && git cat-file -e "$PREVIOUS_SHA" 2>/dev/null; then
+            # Incremental: only files changed since last review
+            FILES=$(git diff --name-only --diff-filter=ACMR "$PREVIOUS_SHA"...HEAD -- '*.swift' | tr '\n' ' ')
             echo "mode=incremental" >> "$GITHUB_OUTPUT"
+            echo "base_ref=$PREVIOUS_SHA" >> "$GITHUB_OUTPUT"
+            echo "Incremental review from $PREVIOUS_SHA"
           else
-            # Full: all Swift files changed in the PR vs base branch
+            # Full: all Swift files changed vs base branch
             FILES=$(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}...HEAD -- '*.swift' | tr '\n' ' ')
             echo "mode=full" >> "$GITHUB_OUTPUT"
+            echo "base_ref=origin/${{ github.base_ref }}" >> "$GITHUB_OUTPUT"
+            echo "Full review vs ${{ github.base_ref }}"
           fi
 
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
           COUNT=$(echo "$FILES" | wc -w | tr -d ' ')
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
           if [ -z "$FILES" ]; then
-            echo "No Swift files to review"
+            echo "No Swift files changed"
           else
-            echo "Review mode: $EVENT | Files ($COUNT): $FILES"
+            echo "Review mode: ${{ steps.changed.outputs.mode }} | Files ($COUNT): $FILES"
           fi
-
-      - name: Clone swift-code-reviewer-skill references
-        if: steps.changed.outputs.files != ''
-        run: |
-          git clone --depth 1 --filter=blob:none --sparse \
-            https://github.com/Viniciuscarvalho/swift-code-reviewer-skill.git /tmp/swift-reviewer
-          cd /tmp/swift-reviewer
-          git sparse-checkout set references
-          echo "--- Checklists loaded ---"
-          ls references/
 
       - name: Build review context
         if: steps.changed.outputs.files != ''
+        id: context
         run: |
-          echo "# Swift Code Review Checklists" > /tmp/review-context.md
-          echo "" >> /tmp/review-context.md
-          for f in /tmp/swift-reviewer/references/*.md; do
-            echo "---" >> /tmp/review-context.md
-            cat "$f" >> /tmp/review-context.md
-            echo "" >> /tmp/review-context.md
-          done
+          # Fetch only SKILL.md from swift-code-reviewer-skill (lightweight)
+          SKILL_URL="https://raw.githubusercontent.com/Viniciuscarvalho/swift-code-reviewer-skill/main/SKILL.md"
+          curl -sf "$SKILL_URL" -o /tmp/SKILL.md || echo "# Swift Code Review Skill" > /tmp/SKILL.md
 
-      - name: Run Claude Code Review
+          SKILL_CONTENT=$(cat /tmp/SKILL.md)
+          echo "skill_tokens=$(echo "$SKILL_CONTENT" | wc -w | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+          # Build diff for changed files only (uses incremental base if available)
+          BASE_REF="${{ steps.changed.outputs.base_ref }}"
+          DIFF=$(git diff "$BASE_REF"...HEAD -- ${{ steps.changed.outputs.files }})
+          echo "$DIFF" > /tmp/pr-diff.txt
+
+          DIFF_LINES=$(wc -l < /tmp/pr-diff.txt | tr -d ' ')
+          echo "diff_lines=$DIFF_LINES" >> "$GITHUB_OUTPUT"
+
+          # Truncate diff if too large (keep under ~6K tokens input)
+          if [ "$DIFF_LINES" -gt 500 ]; then
+            head -500 /tmp/pr-diff.txt > /tmp/pr-diff-truncated.txt
+            mv /tmp/pr-diff-truncated.txt /tmp/pr-diff.txt
+            echo "diff_truncated=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "diff_truncated=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Call Anthropic API (Sonnet)
         if: steps.changed.outputs.files != ''
-        uses: anthropics/claude-code-action@v1
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Guard: abort if no API key configured
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY secret not configured. Add it with: gh secret set ANTHROPIC_API_KEY"
+            exit 1
+          fi
+
+          SKILL=$(cat /tmp/SKILL.md)
+          DIFF=$(cat /tmp/pr-diff.txt)
+
+          # Read project-specific rules if present
+          PROJECT_RULES=""
+          if [ -f ".claude/CLAUDE.md" ]; then
+            PROJECT_RULES=$(cat .claude/CLAUDE.md)
+          fi
+
+          # Build the prompt
+          PROMPT=$(cat <<'PROMPT_EOF'
+          You are a senior Swift/SwiftUI code reviewer. Review the PR diff below.
+
+          ## Instructions
+          - Focus on: bugs, concurrency issues, security, performance, architecture
+          - Severity levels: CRITICAL, HIGH, MEDIUM, LOW
+          - Be concise — no filler, no disclaimers
+          - Reference specific file:line locations
+          - If no issues: give a short positive assessment
+
+          ## Output Format
+
+          ### AI Code Review
+
+          **Files reviewed**: N | **Issues**: N (X critical, Y high, Z medium, W low)
+
+          #### Summary
+          Brief assessment.
+
+          #### Critical / High
+          Issues that MUST be fixed. Include `file:line` and fix suggestion.
+
+          #### Medium
+          Should fix. Include `file:line`.
+
+          #### Low / Good Practices
+          Nice to have + acknowledge good patterns.
+
+          #### Action Items
+          Prioritized checklist.
+          PROMPT_EOF
+          )
+
+          REVIEW_MODE="${{ steps.changed.outputs.mode }}"
+
+          # Assemble the user message with context
+          USER_MSG=$(jq -n \
+            --arg skill "$SKILL" \
+            --arg diff "$DIFF" \
+            --arg rules "$PROJECT_RULES" \
+            --arg files "${{ steps.changed.outputs.files }}" \
+            --arg mode "$REVIEW_MODE" \
+            '{
+              role: "user",
+              content: ("## Review Mode: " + $mode + "\n\nIf incremental: only NEW commits since last review. Do NOT re-review previously reviewed code.\n\n## Review Checklists\n\n" + $skill + "\n\n## Project Rules\n\n" + (if $rules != "" then $rules else "None" end) + "\n\n## Changed Files\n" + $files + "\n\n## Diff\n```\n" + $diff + "\n```")
+            }')
+
+          # Call API with max_tokens: 2048 (cost control)
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "content-type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "$(jq -n \
+              --arg model "claude-sonnet-4-20250514" \
+              --arg system "$PROMPT" \
+              --argjson user_msg "$USER_MSG" \
+              '{
+                model: $model,
+                max_tokens: 2048,
+                system: $system,
+                messages: [$user_msg]
+              }')")
+
+          # Extract review text and token usage
+          REVIEW=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+          INPUT_TOKENS=$(echo "$RESPONSE" | jq -r '.usage.input_tokens // 0')
+          OUTPUT_TOKENS=$(echo "$RESPONSE" | jq -r '.usage.output_tokens // 0')
+          CACHE_READ=$(echo "$RESPONSE" | jq -r '.usage.cache_read_input_tokens // 0')
+          CACHE_CREATE=$(echo "$RESPONSE" | jq -r '.usage.cache_creation_input_tokens // 0')
+          STOP_REASON=$(echo "$RESPONSE" | jq -r '.stop_reason // "unknown"')
+          MODEL_USED=$(echo "$RESPONSE" | jq -r '.model // "unknown"')
+
+          # Check for API errors
+          ERROR=$(echo "$RESPONSE" | jq -r '.error.message // empty')
+          if [ -n "$ERROR" ]; then
+            echo "::error::Anthropic API error: $ERROR"
+            exit 1
+          fi
+
+          if [ -z "$REVIEW" ]; then
+            echo "::error::Empty response from API"
+            echo "$RESPONSE" | jq .
+            exit 1
+          fi
+
+          # Calculate estimated cost (Sonnet pricing: $3/M input, $15/M output)
+          COST=$(echo "scale=4; ($INPUT_TOKENS * 0.003 + $OUTPUT_TOKENS * 0.015) / 1000" | bc)
+
+          # Save outputs
+          echo "$REVIEW" > /tmp/review.md
+          echo "input_tokens=$INPUT_TOKENS" >> "$GITHUB_OUTPUT"
+          echo "output_tokens=$OUTPUT_TOKENS" >> "$GITHUB_OUTPUT"
+          echo "cache_read=$CACHE_READ" >> "$GITHUB_OUTPUT"
+          echo "cache_create=$CACHE_CREATE" >> "$GITHUB_OUTPUT"
+          echo "stop_reason=$STOP_REASON" >> "$GITHUB_OUTPUT"
+          echo "model=$MODEL_USED" >> "$GITHUB_OUTPUT"
+          echo "cost=$COST" >> "$GITHUB_OUTPUT"
+
+      - name: Post review comment
+        if: steps.changed.outputs.files != ''
+        uses: actions/github-script@v7
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: sonnet
-          track_progress: true
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-            REVIEW MODE: ${{ steps.changed.outputs.mode }}
-            CHANGED FILES (${{ steps.changed.outputs.count }}): ${{ steps.changed.outputs.files }}
+          script: |
+            const fs = require('fs');
+            const review = fs.readFileSync('/tmp/review.md', 'utf8');
 
-            You are a senior Swift/SwiftUI code reviewer.
+            const inputTokens = '${{ steps.review.outputs.input_tokens }}';
+            const outputTokens = '${{ steps.review.outputs.output_tokens }}';
+            const cacheRead = '${{ steps.review.outputs.cache_read }}';
+            const model = '${{ steps.review.outputs.model }}';
+            const stopReason = '${{ steps.review.outputs.stop_reason }}';
+            const cost = '${{ steps.review.outputs.cost }}';
+            const diffTruncated = '${{ steps.context.outputs.diff_truncated }}';
 
-            **Review mode: ${{ steps.changed.outputs.mode }}**
-            - If `full`: this is the first review — review all listed files thoroughly.
-            - If `incremental`: only NEW commits were pushed. Review ONLY the listed files (they are the ones that changed since the last review). Do NOT re-review files from previous commits.
+            let truncatedNote = '';
+            if (diffTruncated === 'true') {
+              truncatedNote = '\n> **Note:** Diff was truncated to 500 lines to control costs.\n';
+            }
 
-            ## Review Checklists
+            let stopNote = '';
+            if (stopReason === 'max_tokens') {
+              stopNote = '\n> **Warning:** Review was truncated (hit max_tokens: 2048). Consider splitting the PR.\n';
+            }
 
-            Load and apply the checklists from /tmp/review-context.md which contain:
-            - Swift 6+ quality (concurrency, Sendable, actors, async/await)
-            - SwiftUI patterns (state management, property wrappers, modern APIs)
-            - Performance (view updates, ForEach identity, layout efficiency)
-            - Security (force unwraps, input validation, sensitive data, keychain)
-            - Architecture (MVVM compliance, DI, separation of concerns)
-            - Custom guidelines from .claude/CLAUDE.md if present in the repo
+            const headSha = '${{ steps.changed.outputs.head_sha }}';
+            const reviewMode = '${{ steps.changed.outputs.mode }}';
 
-            ## Output Format
+            const body = `${review}
+            ${truncatedNote}${stopNote}
+            ---
+            <sub>
 
-            Post a single PR comment with this structure:
+            **Layer 2 — AI Review (${reviewMode})** | Model: \`${model}\` | Tokens: ${inputTokens} in / ${outputTokens} out | Cache: ${cacheRead} read | Est. cost: ~$${cost} | Stop: ${stopReason}
 
-            ### Swift Code Review (${{ steps.changed.outputs.mode }})
+            </sub>
+            <!-- reviewed-sha:${headSha} -->`;
 
-            **Files reviewed**: N | **Issues**: N (X critical, Y high, Z medium, W low)
+            // Find and update existing comment or create new
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
 
-            #### Summary
-            Brief assessment of overall code quality.
+            const marker = 'Layer 2 — AI Review';
+            const existing = comments.find(c => c.body.includes(marker));
 
-            #### Critical / High
-            Issues that MUST be fixed before merge. Include `file:line` and code suggestion.
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
 
-            #### Medium
-            Should fix. Include `file:line`.
+      - name: Remove ai-review label after review
+        if: always() && steps.changed.outputs.files != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: 'ai-review',
+              });
+            } catch (e) {
+              // Label may already be removed
+            }
 
-            #### Low
-            Nice to have.
+      - name: Skip — no Swift files
+        if: steps.changed.outputs.files == ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '**AI Review skipped** — no Swift files changed in this PR.\n\n---\n<sub>Layer 2 — AI Review (no tokens used)</sub>',
+            });
 
-            #### Good Practices
-            Acknowledge 2-3 things done well.
-
-            #### Action Items
-            Prioritized checklist of what to fix.
-
-            ## Rules
-            - Read each changed file fully before reviewing
-            - If .claude/CLAUDE.md exists, read it and apply project-specific rules
-            - Use inline comments (mcp__github_inline_comment__create_inline_comment) for Critical/High issues
-            - Use a single PR comment (gh pr comment) for the full report
-            - Be concise — no filler, no disclaimers
-            - If no issues found, still post a short positive report
-            - On incremental reviews, if all issues are resolved, acknowledge it
-
-          claude_args: |
-            --allowedTools "Read,Bash(cat:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),mcp__github_inline_comment__create_inline_comment"
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                name: 'ai-review',
+              });
+            } catch (e) {}

@@ -1,17 +1,21 @@
-name: SwiftLint
+name: "Layer 1: SwiftLint"
 
 on:
   pull_request:
     paths:
-      - '**/*.swift'
+      - "**/*.swift"
   push:
     branches: [main, develop]
     paths:
-      - '**/*.swift'
+      - "**/*.swift"
 
 concurrency:
   group: swiftlint-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   swiftlint:
@@ -34,4 +38,131 @@ jobs:
           swiftlint version
 
       - name: Run SwiftLint
-        run: swiftlint lint --config .swiftlint.yml --strict --reporter github-actions-logging
+        id: lint
+        run: |
+          set +e
+          OUTPUT=$(swiftlint lint --config .swiftlint.yml --strict --reporter json 2>/dev/null)
+          EXIT_CODE=$?
+
+          # Also run with github-actions-logging for inline annotations
+          swiftlint lint --config .swiftlint.yml --strict --reporter github-actions-logging 2>/dev/null || true
+
+          if [ $EXIT_CODE -ne 0 ] && [ -n "$OUTPUT" ]; then
+            echo "has_issues=true" >> "$GITHUB_OUTPUT"
+
+            ERRORS=$(echo "$OUTPUT" | jq '[.[] | select(.severity == "Error")] | length')
+            WARNINGS=$(echo "$OUTPUT" | jq '[.[] | select(.severity == "Warning")] | length')
+            TOTAL=$(echo "$OUTPUT" | jq 'length')
+            echo "errors=$ERRORS" >> "$GITHUB_OUTPUT"
+            echo "warnings=$WARNINGS" >> "$GITHUB_OUTPUT"
+            echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+
+            # Build issue table (top 30 to avoid huge comments)
+            TABLE=$(echo "$OUTPUT" | jq -r '
+              sort_by(if .severity == "Error" then 0 else 1 end) |
+              .[0:30] |
+              .[] |
+              "| \(if .severity == "Error" then ":" else ":" end) \(.severity) | `\(.file | split("/") | last):\(.line)` | \(.rule_id) | \(.reason) |"
+            ')
+            echo "table<<EOFTABLE" >> "$GITHUB_OUTPUT"
+            echo "$TABLE" >> "$GITHUB_OUTPUT"
+            echo "EOFTABLE" >> "$GITHUB_OUTPUT"
+
+            TRUNCATED=""
+            if [ "$TOTAL" -gt 30 ]; then
+              TRUNCATED="_(showing 30 of $TOTAL issues)_"
+            fi
+            echo "truncated=$TRUNCATED" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_issues=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post PR comment with report
+        if: steps.lint.outputs.has_issues == 'true' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const errors = ${{ steps.lint.outputs.errors }};
+            const warnings = ${{ steps.lint.outputs.warnings }};
+            const total = ${{ steps.lint.outputs.total }};
+            const truncated = `${{ steps.lint.outputs.truncated }}`;
+
+            const body = `## SwiftLint Report
+
+            **${total} issues found** (${errors} errors, ${warnings} warnings)
+
+            | Severity | Location | Rule | Description |
+            |----------|----------|------|-------------|
+            ${{ steps.lint.outputs.table }}
+            ${truncated}
+
+            ---
+
+            ### How to fix
+
+            Choose one:
+
+            1. **Autofix** — run locally:
+               \`\`\`bash
+               swiftlint lint --fix --config .swiftlint.yml
+               \`\`\`
+
+            2. **Claude Code** — run locally:
+               \`\`\`bash
+               claude "fix the SwiftLint issues in this PR"
+               \`\`\`
+
+            3. **Request AI Review** — add the \`ai-review\` label to this PR for a full AI-powered code review
+
+            ---
+            _Layer 1 — SwiftLint CI (no API cost)_`;
+
+            // Find and update existing comment or create new one
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const marker = '## SwiftLint Report';
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
+
+      - name: Post clean comment
+        if: steps.lint.outputs.has_issues == 'false' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const marker = '## SwiftLint Report';
+            const existing = comments.find(c => c.body.includes(marker));
+
+            // If there was a previous report, update it to show clean state
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: `## SwiftLint Report\n\nAll clean — no issues found.\n\n---\n_Layer 1 — SwiftLint CI (no API cost)_`,
+              });
+            }

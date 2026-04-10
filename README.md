@@ -221,7 +221,14 @@ See the full [SwiftLint rule directory](https://realm.github.io/SwiftLint/rule-d
 To update workflows **without overwriting your custom `.swiftlint.yml`**:
 
 ```bash
+cd /path/to/your-project
 curl -sL https://raw.githubusercontent.com/Viniciuscarvalho/sonar-swift/main/bin/install.sh | bash -s -- update
+```
+
+After updating, make sure the `ai-review` label exists in your repo (required for Layer 2):
+
+```bash
+gh label create ai-review -c 8B5CF6 -d "Trigger AI code review" -R your-username/your-repo
 ```
 
 The installer supports three modes:
